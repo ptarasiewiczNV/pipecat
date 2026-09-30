@@ -68,12 +68,14 @@ _MoqError = cast("type[BaseException]", moq.Error)
 # mid-track without finishing, or the handle was already closed.
 _NORMAL_CLOSE_CODES = frozenset({0, 24, 25})  # Cancel, Dropped, Closed
 
-# ``Dropped`` is the one normal-close reason with no typed binding: ``Cancel``
-# and ``Closed`` arrive as ``Error.Cancelled``/``Error.Closed`` and are caught
-# by ``moq.is_shutdown``, while a dropped producer only ever shows up as this
-# reason on a subsystem error like ``Error.Audio``. Matching just this one
-# keeps errors that merely mention cancellation propagating.
-_NORMAL_CLOSE_REASONS = frozenset({"dropped"})
+# ``Cancel`` and ``Dropped`` again, as moq-net's reason rather than a code: an
+# error such as ``Error.Protocol``, ``Error.JsonTrack`` or ``Error.Audio``
+# carries it as its message tail (``"cancelled"``, ``"moq: dropped"``). A relay
+# cancels a subscription when the session publishing the broadcast ends, which
+# includes a reconnecting peer replacing it with a fresh one. Only the whole
+# reason is matched, so an error that merely mentions cancellation still
+# propagates.
+_NORMAL_CLOSE_REASONS = frozenset({"dropped", "cancelled"})
 
 _REMOTE_CODE_RE = re.compile(r"remote error: code=(\d+)")
 
@@ -85,20 +87,23 @@ def _is_normal_close(exc: BaseException) -> bool:
     session rather than a failure. The session itself reports a normal
     WebTransport close (code=0) as an ``Error.Protocol`` whose message
     contains ``"webtransport error: closed"``. A track subscription still
-    in flight is reset by the peer; ``Error::from_transport`` decodes only
-    code 0 into a typed ``Cancelled``, so every other received code stays
-    ``Remote(n)`` and reads as ``"remote error: code=n"``. Finally the
-    error can be raised locally, carrying the moq-net reason as its
-    message tail — a browser that disconnects mid-call drops its
-    microphone producer without finishing, and the bot's audio subscriber
-    sees ``Error.Audio("moq: dropped")``.
+    in flight is reset by the peer; moq-net decodes reset code 0 as its
+    ``Cancel``, which reads as ``"cancelled"``, and every other received
+    code stays ``Remote(n)`` and reads as ``"remote error: code=n"``.
+    Finally a subscription can end with the moq-net reason as its message
+    tail — a browser that disconnects mid-call drops its microphone
+    producer without finishing, and the bot's audio subscriber sees
+    ``Error.Audio("moq: dropped")``; a relay that cancels the subscription
+    when the peer's session ends surfaces as
+    ``Error.JsonTrack("cancelled")``. The typed ``Error.Cancelled`` and
+    ``Error.Closed`` come from our own cancel and close.
 
     Callers log these at debug and skip the ``on_error`` handler instead
     of reporting ERROR + traceback.
     """
     if not isinstance(exc, moq.Error):
         return False
-    # Cancelled and Closed have typed bindings; Dropped does not.
+    # Our own cancel or close; a remote Cancel arrives as a reason below.
     if moq.is_shutdown(exc):
         return True
     msg = str(exc)
